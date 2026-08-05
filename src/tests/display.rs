@@ -477,3 +477,66 @@ fn test_wake_refreshes_active_workspace() {
         })
         .run(commands);
 }
+
+/// A bruteforce scan against an unresponsive application can effectively
+/// never complete. Initialization must not wait for it forever: after a
+/// bounded deadline `finish_setup` completes without the stragglers, which
+/// keep draining in `reap_bruteforced_windows`.
+#[test]
+fn test_init_completes_despite_hung_bruteforce() {
+    use bevy::tasks::AsyncComputeTaskPool;
+    use bevy::tasks::futures_lite::future;
+
+    use crate::ecs::{BruteforceWindows, Initializing};
+
+    let mut harness = TestHarness::new().with_windows(1);
+
+    // Large manual time steps so the init deadline elapses within a few
+    // harness iterations; virtual time clamps deltas unless max_delta is
+    // lifted.
+    harness
+        .app
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs(2)));
+    harness
+        .app
+        .world_mut()
+        .resource_mut::<Time<Virtual>>()
+        .set_max_delta(Duration::from_secs(10));
+
+    // A bruteforce scan that never finishes.
+    let task = AsyncComputeTaskPool::get().spawn(future::pending());
+    harness.world().spawn(BruteforceWindows(task));
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(0, |world, _state| {
+            assert!(
+                world.get_resource::<Initializing>().is_some(),
+                "initialization should still be waiting within the deadline"
+            );
+        })
+        .on_iteration(2, |world, _state| {
+            assert!(
+                world.get_resource::<Initializing>().is_none(),
+                "initialization should complete despite the hung bruteforce scan"
+            );
+            assert!(
+                world
+                    .query::<&BruteforceWindows>()
+                    .iter(world)
+                    .next()
+                    .is_some(),
+                "the hung scan should still be pending for the background reaper"
+            );
+        })
+        .run(commands);
+}

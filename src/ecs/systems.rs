@@ -190,7 +190,7 @@ pub(crate) fn add_existing_application(
 /// * `displays` - A query for all `Display` entities, including whether they have the `ActiveDisplayMarker`.
 /// * `window_manager` - The `WindowManager` resource for refreshing displays and getting active space information.
 /// * `commands` - Bevy commands to insert components like `FocusedMarker`.
-#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::needless_pass_by_value, clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(crate) fn finish_setup(
     process_query: Query<Entity, With<ExistingMarker>>,
@@ -199,25 +199,42 @@ pub(crate) fn finish_setup(
     mut bruteforce_tasks: Query<(Entity, &mut BruteforceWindows)>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>, &ChildOf)>,
     window_manager: Res<WindowManager>,
+    clock: Res<Time>,
     mut commands: Commands,
 ) {
+    const BRUTEFORCE_INIT_DEADLINE_SEC: f32 = 10.0;
+
     if !process_query.is_empty() {
         // The other two add_* functions are still running..
         return;
     }
 
     // Reap the bruteforced windows.
-    if !bruteforce_tasks.is_empty() {
-        for (entity, mut job) in &mut bruteforce_tasks {
-            if let Some(found_windows) = future::block_on(future::poll_once(&mut job.0)) {
-                commands.trigger(SpawnWindowTrigger(found_windows));
-                if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                    entity_commands.try_despawn();
-                }
+    let mut pending_tasks = 0;
+    for (entity, mut job) in &mut bruteforce_tasks {
+        if let Some(found_windows) = future::block_on(future::poll_once(&mut job.0)) {
+            commands.trigger(SpawnWindowTrigger(found_windows));
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
             }
+        } else {
+            pending_tasks += 1;
         }
-        // Wait for the next tick to finish initialization.
-        return;
+    }
+    if pending_tasks > 0 {
+        // A single unresponsive application stalls its bruteforce scan for a
+        // very long time (32k sequential AX calls, each waiting on a dead AX
+        // connection), which used to wedge initialization forever. Wait a
+        // bounded time, then finish initialization and let the stragglers
+        // drain in reap_bruteforced_windows.
+        if clock.elapsed_secs() < BRUTEFORCE_INIT_DEADLINE_SEC {
+            // Wait for the next tick to finish initialization.
+            return;
+        }
+        warn!(
+            "{pending_tasks} bruteforce scan(s) still pending after \
+             {BRUTEFORCE_INIT_DEADLINE_SEC}s, finishing initialization without them."
+        );
     }
 
     info!(
@@ -289,6 +306,24 @@ pub(crate) fn finish_setup(
 
     commands.remove_resource::<Initializing>();
     commands.trigger(RestoreWindowState);
+}
+
+/// Reaps bruteforce scans which were still running when initialization
+/// finished (see the deadline in `finish_setup`), so their windows are still
+/// spawned once the unresponsive application finally answers.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn reap_bruteforced_windows(
+    mut bruteforce_tasks: Populated<(Entity, &mut BruteforceWindows)>,
+    mut commands: Commands,
+) {
+    for (entity, mut job) in &mut bruteforce_tasks {
+        if let Some(found_windows) = future::block_on(future::poll_once(&mut job.0)) {
+            commands.trigger(SpawnWindowTrigger(found_windows));
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_despawn();
+            }
+        }
+    }
 }
 
 /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,

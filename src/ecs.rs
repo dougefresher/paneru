@@ -112,6 +112,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(resource_exists::<Initializing>),
             systems::add_launched_process,
             systems::add_launched_application,
+            systems::reap_bruteforced_windows.run_if(not(resource_exists::<Initializing>)),
             systems::fresh_marker_cleanup,
             systems::timeout_ticker,
             systems::retry_front_switch,
@@ -349,7 +350,7 @@ pub struct StrayFocusEvent(pub WinID);
 pub struct RetryFrontSwitch(pub Entity);
 
 #[derive(Component)]
-pub struct BruteforceWindows(Task<Vec<Window>>);
+pub struct BruteforceWindows(pub(crate) Task<Vec<Window>>);
 
 #[derive(Component, Debug)]
 pub enum DockPosition {
