@@ -339,6 +339,7 @@ pub(super) fn mission_control_trigger(
     )>,
     mut mission_control_active: ResMut<MissionControlActive>,
     window_manager: Res<WindowManager>,
+    initializing: Option<Res<Initializing>>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -360,9 +361,14 @@ pub(super) fn mission_control_trigger(
 
                 // Check if some windows disappeared from the current workspace
                 // - e.g. they were moved away during mission control.
-                if let Some(mut active_strip) = workspaces
-                    .iter_mut()
-                    .find_map(|(_, strip, active, _)| active.then_some(strip))
+                // Not during initialization though: windows have not been
+                // distributed to their real workspaces yet, and evicting them
+                // here strands them outside any strip before finish_setup
+                // gets to re-home them.
+                if initializing.is_none()
+                    && let Some(mut active_strip) = workspaces
+                        .iter_mut()
+                        .find_map(|(_, strip, active, _)| active.then_some(strip))
                     && let Ok(present_windows) =
                         window_manager.windows_in_workspace(active_strip.id())
                 {
